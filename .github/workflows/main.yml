@@ -1,0 +1,185 @@
+name: Build Kernel for Realking_kernel_sm8250
+
+on:
+  workflow_dispatch: # Cho phép chạy workflow thủ công từ GitHub Actions UI
+  push:
+    branches:
+      - main # HOẶC TÊN NHÁNH CHÍNH CỦA REPO MỚI CỦA BẠN (thường là main hoặc master)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest # Sử dụng máy ảo Ubuntu mới nhất
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }} # Checkout chính repo hiện tại của bạn (ldt2003/Realking_kernel_sm8250)
+          ref: main                           # HOẶC TÊN NHÁNH CHÍNH CỦA REPO MỚI CỦA BẠN
+          submodules: true                    # Đảm bảo tải cả submodule nếu có
+
+      - name: Full Build Process
+        run: |
+          echo "Bắt đầu quá trình build kernel cho Realking_kernel_sm8250..."
+
+          # Bước 1: Thiết lập môi trường build và cài đặt phụ thuộc
+          echo "Thiết lập môi trường build và cài đặt phụ thuộc..."
+          sudo apt update
+          sudo apt install -y git wget zip unzip make flex bison libssl-dev libelf-dev bc cpio build-essential zstd lz4 xz-utils coreutils procps || { echo "Lỗi: Không thể cài đặt các gói phụ thuộc."; exit 1; }
+
+          # Bước 2: Clone Clang Toolchain từ GitLab
+          echo "Cloning Clang toolchain từ GitLab (Provasishh)..."
+          mkdir -p tc/clang_repo 
+          mkdir -p tc/clang      
+          
+          git clone --depth=1 https://gitlab.com/provasishh/clang.git tc/clang_repo || { echo "Lỗi: Không thể clone Clang toolchain."; exit 1; }
+          
+          echo "Kiểm tra nội dung của tc/clang_repo trước khi di chuyển:"
+          ls -F tc/clang_repo/ 
+
+          if [ -d "tc/clang_repo/clang" ]; then
+              shopt -s dotglob # Bật globbing cho các file ẩn
+              mv tc/clang_repo/clang/* tc/clang/ || { echo "Lỗi: Không thể di chuyển nội dung tc/clang_repo/clang/ vào tc/clang/."; exit 1; }
+              shopt -u dotglob # Tắt globbing
+          else
+              echo "Lỗi: Thư mục 'clang/' không tìm thấy trong tc/clang_repo. Cấu trúc repo không như mong đợi."
+              exit 1
+          fi
+          
+          if [ -d "tc/clang_repo/aarch64-linux-android-4.9" ]; then
+              mv tc/clang_repo/aarch64-linux-android-4.9 tc/aarch64-linux-android-4.9 || { echo "Lỗi: Không thể di chuyển GCC cũ."; exit 1; }
+          fi
+
+          rm -rf tc/clang_repo 
+
+          echo "Nội dung của ${GITHUB_WORKSPACE}/tc/clang/bin sau khi di chuyển:"
+          ls -F "${GITHUB_WORKSPACE}/tc/clang/bin/" 
+          
+          if [ ! -f "${GITHUB_WORKSPACE}/tc/clang/bin/clang" ]; then
+              echo "Lỗi: Clang executable không tìm thấy tại ${GITHUB_WORKSPACE}/tc/clang/bin/clang"
+              echo "Cấu trúc thư mục tc/clang tổng thể:"
+              ls -R "${GITHUB_WORKSPACE}/tc/clang/" 
+              exit 1
+          fi
+          
+          if [ ! -x "${GITHUB_WORKSPACE}/tc/clang/bin/clang" ]; then
+              echo "Lỗi: Clang executable không có quyền thực thi tại ${GITHUB_WORKSPACE}/tc/clang/bin/clang"
+              chmod +x "${GITHUB_WORKSPACE}/tc/clang/bin/clang" || { echo "Lỗi: Không thể cấp quyền thực thi cho clang."; exit 1; }
+              echo "Đã cấp quyền thực thi cho clang."
+          fi
+          
+          echo "Clang toolchain đã sẵn sàng."
+
+          # Bước 3: Áp dụng bản vá SukiSU-Ultra và susfs
+          echo "Áp dụng bản vá SukiSU-Ultra và susfs..."
+          # Với các bản vá này, hãy đảm bảo chúng tương thích với kernel source mới
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main || { echo "Lỗi: Áp dụng bản vá SukiSU-Ultra thất bại."; exit 1; }
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev || { echo "Lỗi: Áp dụng bản vá susfs-dev thất bại."; exit 1; }
+          echo "Đã vá kernel."
+
+          # Bước 4: Clone AnyKernel3
+          echo "Cloning AnyKernel3..."
+          git clone https://github.com/yassshhhh15/AnyKernel3.git --depth=1 anykernel || { echo "Lỗi: Không thể clone AnyKernel."; exit 1; }
+
+          # Bước 5: Build và đóng gói Kernel
+          echo "Bắt đầu biên dịch và đóng gói kernel..."
+
+          # Cài đặt biến môi trường cho quá trình build trong cùng shell này
+          export KERNEL_SRC="${GITHUB_WORKSPACE}" 
+          export KERNEL_OUT="${GITHUB_WORKSPACE}/out"
+          export PATH="${GITHUB_WORKSPACE}/tc/clang/bin:${PATH}"
+          
+          DT=$(date +"%Y%m%d-%HM")
+          # RẤT QUAN TRỌNG: Xác định chính xác defconfig cho Realking_kernel_sm8250
+          # Thường là arch/arm64/configs/<tên_device>_defconfig
+          # Bạn cần kiểm tra trong repo mới của mình. Ví dụ:
+          CONFIG_FILE="arch/arm64/configs/vayu_defconfig" # Đây chỉ là ví dụ, hãy kiểm tra chính xác!
+
+          export KERNEL_ARCH=arm64
+          export CLANG_TRIPLE="aarch64-linux-gnu-" 
+          export CROSS_COMPILE="aarch64-linux-gnu-" 
+
+          export CC="clang" 
+          export LD="ld.lld" 
+          export AR="llvm-ar"
+          export NM="llvm-nm"
+          export OBJCOPY="llvm-objcopy" 
+          export OBJDUMP="llvm-objdump" 
+          export STRIP="llvm-strip" 
+
+          export HOSTCC="clang"
+          export HOSTAR="llvm-ar"
+          export HOSTLD="ld.lld"
+          export HOSTAS="clang"
+          export HOSTCXX="clang++"
+          
+          COMMON_MAKE_FLAGS="ARCH=${KERNEL_ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-array-bounds"
+
+          echo "Dọn dẹp bản build cũ..."
+          make O="${KERNEL_OUT}" ${COMMON_MAKE_FLAGS} mrproper || { echo "Lỗi: make mrproper thất bại."; exit 1; }
+
+          echo "Tạo cấu hình ${CONFIG_FILE}..."
+          make O="${KERNEL_OUT}" ${COMMON_MAKE_FLAGS} "${CONFIG_FILE}" || { echo "Lỗi: Tạo cấu hình defconfig thất bại."; exit 1; }
+
+          echo "Bắt đầu biên dịch kernel..."
+          make -j$(nproc --all) O="${KERNEL_OUT}" ${COMMON_MAKE_FLAGS} 2>&1 | tee "${GITHUB_WORKSPACE}/build.log"
+          
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+              echo "Lỗi: Biên dịch kernel thất bại. Kiểm tra build.log để biết chi tiết."
+              exit 1
+          fi
+          echo "Biên dịch kernel hoàn tất."
+
+          echo "Đang đóng gói kernel thành file ZIP..."
+          
+          IMAGE_PATH="${KERNEL_OUT}/arch/${KERNEL_ARCH}/boot/Image"
+          # RẤT QUAN TRỌNG: Kiểm tra vị trí chính xác của dtbo.img và dtb/dtbs trong kernel mới
+          # Các kernel sm8250 có thể tạo dtbo.img và dtb ở các vị trí khác nhau.
+          # Ví dụ:
+          # DTBO_PATH="${KERNEL_OUT}/arch/${KERNEL_ARCH}/boot/dtbo.img"
+          # DTB_PATH="${KERNEL_OUT}/arch/${KERNEL_ARCH}/boot/dts/qcom/sm8250-v2.dtb" # hoặc tên dtb khác
+          # Nếu chỉ có dtb/dtbo chung trong Image.gz-dtb thì không cần cp riêng.
+          
+          # Bạn có thể tìm các file này bằng lệnh find sau khi build thử trên môi trường cục bộ:
+          # find out/arch/arm64/boot -name "Image" -o -name "*.dtb" -o -name "*.img"
+          
+          if [ ! -f "${IMAGE_PATH}" ]; then
+              echo "Lỗi: Không tìm thấy Image kernel tại ${IMAGE_PATH}."
+              exit 1
+          fi
+
+          cd anykernel || { echo "Lỗi: Không vào được thư mục anykernel."; exit 1; }
+          rm -f *.zip 
+
+          cp "${IMAGE_PATH}" .
+          # Chỉ copy dtbo.img và dtb nếu chúng thực sự tồn tại và cần thiết
+          # [ -f "${DTBO_PATH}" ] && cp "${DTBO_PATH}" .
+          # [ -f "${DTB_PATH}" ] && cp "${DTB_PATH}" .
+
+          zip_filename="Realking-SM8250-${DT}.zip" # Đổi tên file ZIP theo kernel mới
+          echo "Tạo file: ${zip_filename}"
+          zip -r9 "${zip_filename}" * -x ".git/*" -x "README.md" || { echo "Lỗi: Tạo file ZIP thất bại."; exit 1; }
+          
+          echo "Đã tạo file: $(pwd)/${zip_filename}"
+          
+          rm -f Image dtbo.img dtb # Xóa tạm thời
+
+          cd "${GITHUB_WORKSPACE}" 
+        
+      - name: Upload Kernel Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-zip
+          path: anykernel/*.zip 
+          retention-days: 7 
+          
+      - name: Clean up compiled images
+        run: |
+          echo "Đang xóa các ảnh đã biên dịch khỏi thư mục out..."
+          local BOOT_DIR="${KERNEL_OUT}/arch/${KERNEL_ARCH}/boot"
+          if [ -d "${BOOT_DIR}" ]; then
+              rm -f "${BOOT_DIR}/Image" "${BOOT_DIR}/dtbo.img" "${BOOT_DIR}/dtb"
+              echo "Đã xóa Image, dtbo.img, dtb từ ${BOOT_DIR}."
+          else
+              echo "Cảnh báo: Thư mục boot không tồn tại: ${BOOT_DIR}."
+          fi
